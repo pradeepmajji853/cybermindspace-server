@@ -112,8 +112,8 @@ router.post('/verify', auth, async (req, res) => {
 });
 
 const PLAN_PRICES = {
-  pro: 299,
-  elite: 799,
+  pro: 199,
+  elite: 199, // backward compat — maps to pro
 };
 
 // Create one-time order for plan upgrade

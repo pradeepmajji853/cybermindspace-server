@@ -11,8 +11,7 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim
 /**
  * Tiered rate limiter middleware.
  * - Free: 5 scans/day, partial results
- * - Pro: Unlimited scans, full results
- * - Elite: Unlimited scans, full results, priority
+ * - Pro: Unlimited scans, full results, all tools
  */
 async function rateLimiter(req, res, next) {
   try {
@@ -21,7 +20,7 @@ async function rateLimiter(req, res, next) {
     const userData = userDoc.exists ? userDoc.data() : {};
 
     const isAdmin = ADMIN_EMAILS.includes(req.user.email);
-    const plan = isAdmin ? 'elite' : (userData.plan || 'free');
+    const plan = isAdmin ? 'pro' : (userData.plan || 'free');
     const limit = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
 
     // Daily reset logic
