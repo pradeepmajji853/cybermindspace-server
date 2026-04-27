@@ -2,19 +2,24 @@ const router = require('express').Router();
 const auth = require('../middleware/auth');
 const { db } = require('../config/firebase');
 
-// Get current user profile
+// Get current user profile (always reads fresh from Firestore)
 router.get('/me', auth, async (req, res) => {
   try {
+    // Read fresh from Firestore to get latest searchesToday
+    const freshDoc = await req.userRef.get();
+    const freshData = freshDoc.exists ? freshDoc.data() : {};
+
     res.json({
       user: {
         uid: req.user.uid,
-        email: req.user.email,
-        displayName: req.user.displayName,
-        photoURL: req.user.photoURL || '',
-        plan: req.user.plan,
-        isPro: req.user.isPro || false,
-        searchesToday: req.user.searchesToday || 0,
-        createdAt: req.user.createdAt,
+        email: freshData.email || req.user.email,
+        displayName: freshData.displayName || req.user.displayName,
+        photoURL: freshData.photoURL || req.user.photoURL || '',
+        plan: freshData.plan || req.user.plan,
+        isPro: freshData.isPro || false,
+        searchesToday: freshData.searchesToday || 0,
+        lastSearchDate: freshData.lastSearchDate || null,
+        createdAt: freshData.createdAt || req.user.createdAt,
       },
     });
   } catch (err) {
