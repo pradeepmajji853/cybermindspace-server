@@ -14,41 +14,53 @@ async function authMiddleware(req, res, next) {
     }
 
     const idToken = header.split('Bearer ')[1];
-    const decoded = await auth.verifyIdToken(idToken);
-
-    // Get or create user document in Firestore
-    const userRef = db.collection('users').doc(decoded.uid);
-    const userDoc = await userRef.get();
-
-    if (userDoc.exists) {
-      const data = userDoc.data();
-      // Normalize plan field
-      const validPlans = ['free', 'pro', 'elite'];
-      const plan = validPlans.includes(data.plan) ? data.plan : 'free';
-      
-      req.user = { uid: decoded.uid, ...data, plan };
-    } else {
-      // Auto-create user doc on first authenticated request
-      const userData = {
-        uid: decoded.uid,
-        email: decoded.email || '',
-        displayName: decoded.name || decoded.email?.split('@')[0] || 'User',
-        photoURL: decoded.picture || '',
-        plan: 'free',
-        isPro: false,
-        searchesToday: 0,
-        lastSearchDate: null,
-        createdAt: new Date().toISOString(),
-      };
-      await userRef.set(userData);
-      req.user = userData;
+    let decoded;
+    
+    try {
+      decoded = await auth.verifyIdToken(idToken);
+    } catch (authErr) {
+      console.error('[AUTH] Token verification failed:', authErr.message);
+      return res.status(401).json({ error: 'Invalid or expired token' });
     }
 
-    req.userRef = userRef;
-    next();
+    try {
+      // Get or create user document in Firestore
+      const userRef = db.collection('users').doc(decoded.uid);
+      const userDoc = await userRef.get();
+
+      if (userDoc.exists) {
+        const data = userDoc.data();
+        // Normalize plan field
+        const validPlans = ['free', 'pro', 'elite'];
+        const plan = validPlans.includes(data.plan) ? data.plan : 'free';
+        
+        req.user = { uid: decoded.uid, ...data, plan };
+      } else {
+        // Auto-create user doc on first authenticated request
+        const userData = {
+          uid: decoded.uid,
+          email: decoded.email || '',
+          displayName: decoded.name || decoded.email?.split('@')[0] || 'User',
+          photoURL: decoded.picture || '',
+          plan: 'free',
+          isPro: false,
+          searchesToday: 0,
+          lastSearchDate: null,
+          createdAt: new Date().toISOString(),
+        };
+        await userRef.set(userData);
+        req.user = userData;
+      }
+
+      req.userRef = userRef;
+      next();
+    } catch (dbErr) {
+      console.error('[AUTH] Firestore error:', dbErr.message);
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
   } catch (err) {
-    console.error('[AUTH] Token verification failed:', err.message);
-    return res.status(401).json({ error: 'Invalid or expired token' });
+    console.error('[AUTH] Unexpected error:', err.message);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 }
 
