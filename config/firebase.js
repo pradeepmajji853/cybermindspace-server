@@ -5,9 +5,14 @@ const path = require('path');
 // In production, use GOOGLE_APPLICATION_CREDENTIALS env var or service account file
 let serviceAccount;
 try {
-  serviceAccount = require(path.resolve(process.env.FIREBASE_SERVICE_ACCOUNT || './config/serviceAccountKey.json'));
+  const envKey = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (envKey && envKey.trim().startsWith('{')) {
+    serviceAccount = JSON.parse(envKey);
+  } else {
+    serviceAccount = require(path.resolve(envKey || './config/serviceAccountKey.json'));
+  }
 } catch (e) {
-  console.warn('[FIREBASE] No service account file found. Using default credentials or emulator.');
+  console.warn('[FIREBASE] No service account found. Using default credentials or emulator:', e.message);
   serviceAccount = null;
 }
 
