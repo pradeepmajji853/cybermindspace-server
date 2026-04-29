@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 // Initialize Firebase (must be before routes)
 require('./config/firebase');
@@ -15,13 +16,36 @@ const adminRoutes = require('./routes/admin');
 const app = express();
 const PORT = process.env.PORT || 5001;
 
-// Middleware
-app.use(helmet());
-app.use(cors({ origin: '*' }));
+// Trust proxy so req.ip honors X-Forwarded-For when behind Vercel/Render/etc.
+app.set('trust proxy', 1);
+
+// Security headers — keep CSP off for the API (no HTML served)
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+
+// CORS — explicit allowlist in prod, permissive in dev
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean);
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (!allowedOrigins.length) return cb(null, true);
+    return cb(null, allowedOrigins.includes(origin));
+  },
+  credentials: true,
+}));
+
+// Global per-IP floor — protects auth and read endpoints
+app.use('/api', rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
+  message: { error: 'Too many requests', code: 'GLOBAL_THROTTLE' },
+}));
 
 // Raw body for Razorpay webhooks
 app.use('/api/payment/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json());
+app.use(express.json({ limit: '256kb' }));
 
 // Routes
 app.use('/api/osint', osintRoutes);
@@ -30,6 +54,7 @@ app.use('/api/payment', paymentRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/tools', require('./routes/tools'));
+app.use('/api/recon', require('./routes/recon'));
 
 // Health check
 app.get('/api/health', (req, res) => {

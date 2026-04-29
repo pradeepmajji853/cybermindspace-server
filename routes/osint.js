@@ -17,6 +17,7 @@ const waybackIntel = require('../modules/waybackIntel');
 const techStack = require('../modules/techStack');
 const takeoverScanner = require('../modules/takeoverScanner');
 const whoisPrivacy = require('../modules/whoisPrivacy');
+const { generateAIAssistance } = require('../services/aiService');
 
 // Run OSINT investigation
 router.post('/investigate', auth, rateLimiter, validate, async (req, res) => {
@@ -92,6 +93,9 @@ router.post('/investigate', auth, rateLimiter, validate, async (req, res) => {
     const risk = calculateRisk(results);
     results._risk = risk;
 
+    // AI suggestions
+    const aiSuggestions = await generateAIAssistance(query, inputType, results);
+
     // Truncate results for free users
     const plan = req.userPlan || 'free';
     let truncated = false;
@@ -144,6 +148,7 @@ router.post('/investigate', auth, rateLimiter, validate, async (req, res) => {
       results,
       riskScore: risk.score,
       riskIndicators: risk.indicators,
+      aiSuggestions,
       plan,
       saved: false,
       createdAt: new Date().toISOString(),
@@ -158,6 +163,7 @@ router.post('/investigate', auth, rateLimiter, validate, async (req, res) => {
       results,
       riskScore: risk.score,
       riskIndicators: risk.indicators,
+      aiSuggestions,
       searchesRemaining: req.searchesRemaining,
       plan,
       truncated,
