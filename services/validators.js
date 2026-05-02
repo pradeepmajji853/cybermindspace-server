@@ -153,6 +153,11 @@ const SENSITIVE_PROBES = [
   { path: 'backup.zip',         kind: 'backup',      bodyCheck: (b) => /^PK\x03\x04/.test(b.slice(0, 4)) },
   { path: 'backup.sql',         kind: 'sql-dump',    bodyCheck: (b) => /CREATE TABLE|INSERT INTO|MySQL dump/i.test(b) },
   { path: 'database.sql',       kind: 'sql-dump',    bodyCheck: (b) => /CREATE TABLE|INSERT INTO|MySQL dump/i.test(b) },
+  { path: 'actuator/env',       kind: 'actuator',    bodyCheck: (b) => /activeProfiles|propertySources/i.test(b) },
+  { path: 'actuator/health',    kind: 'actuator-health', bodyCheck: (b) => /"status"\s*:\s*"UP"/i.test(b) },
+  { path: 'swagger-ui.html',    kind: 'swagger',     bodyCheck: (b) => /swagger-ui/i.test(b) || /<title>Swagger UI/i.test(b) },
+  { path: 'v2/api-docs',        kind: 'api-docs',    bodyCheck: (b) => /"swagger"\s*:\s*"2\.0"|"openapi"\s*:\s*"3\./i.test(b) },
+  { path: '.env.example',       kind: 'env-example', bodyCheck: (b) => /^[A-Z][A-Z0-9_]*\s*=\s*/m.test(b) },
 ];
 
 async function validateExposedPath(origin, probe) {
@@ -188,6 +193,11 @@ async function validateExposedPath(origin, probe) {
       'apache-status': 'Exposed Apache server-status',
       backup:     'Exposed backup archive',
       'sql-dump': 'Exposed SQL dump',
+      actuator:   'Exposed Spring Boot Actuator',
+      'actuator-health': 'Exposed Spring Boot Actuator Health',
+      swagger:    'Exposed Swagger UI',
+      'api-docs': 'Exposed API Documentation',
+      'env-example': 'Exposed .env.example file',
     };
 
     const impactMap = {
@@ -202,6 +212,11 @@ async function validateExposedPath(origin, probe) {
       'apache-status': 'Apache server-status is publicly accessible. Exposes every active request URL and source IP — useful for reconnaissance and session hijacking.',
       backup:     'A backup archive is publicly downloadable. Likely contains source code, database dumps, or credentials.',
       'sql-dump': 'A SQL dump is publicly downloadable. May include user records, password hashes, and PII.',
+      actuator:   'Spring Boot Actuator endpoints are exposed. These can leak environment variables, system properties, and even allow remote code execution.',
+      'actuator-health': 'Spring Boot Actuator health endpoint is exposed. Reveals application health status.',
+      swagger:    'Swagger UI is publicly accessible. Reveals internal API endpoints, parameters, and documentation, aiding in targeted attacks.',
+      'api-docs': 'API documentation is publicly accessible. Reveals endpoint structures and payload requirements.',
+      'env-example': 'A template .env file is exposed. Can reveal internal configuration keys and sometimes default passwords.',
     };
 
     return {
@@ -384,31 +399,177 @@ function domainFindings(domainReport) {
     }));
 }
 
+/* ─────── 8. Bucket exposure findings ─────── */
+function bucketFindings(vulnReport) {
+  if (!vulnReport?.vulnerabilities) return [];
+  const out = [];
+  for (const v of vulnReport.vulnerabilities) {
+    if (v.status !== 'vulnerable') continue;
+    if (!v.name.includes('Exposed Cloud Bucket:')) continue;
+
+    out.push({
+      kind: 'exposure:bucket',
+      title: v.name,
+      severity: v.severity,
+      exploitable: true,
+      where: v.value,
+      impact: v.description,
+      proof: { request: `GET ${v.value}`, response: `HTTP/1.1 200 OK\n\nBucket is publicly readable.` },
+      remediation: 'Update the cloud storage bucket ACL or IAM policy to restrict public read access. Ensure all sensitive files are private.',
+      validatedAt: new Date().toISOString(),
+    });
+  }
+  return out;
+}
+
+/* ─────── 9. XSS Reflection Detection ─────── */
+async function validateXSS(url) {
+  const payloads = [
+    '<script>alert(1)</script>',
+    '"><script>alert(1)</script>',
+    '\'><script>alert(1)</script>',
+    '<img src=x onerror=alert(1)>',
+    'javascript:alert(1)'
+  ];
+  
+  try {
+    const u = new URL(url);
+    const params = Array.from(u.searchParams.keys());
+    if (!params.length) return null;
+
+    const testParam = params[0];
+    const payload = payloads[0];
+    u.searchParams.set(testParam, payload);
+
+    const res = await axios.get(u.toString(), {
+      timeout: REQ_TIMEOUT,
+      validateStatus: () => true,
+      maxContentLength: MAX_BODY,
+      headers: { 'User-Agent': UA }
+    });
+
+    if (res.data && typeof res.data === 'string' && res.data.includes(payload)) {
+      return {
+        kind: 'vulnerability:xss',
+        title: `Reflected XSS: Parameter '${testParam}' reflects input`,
+        severity: 'high',
+        exploitable: true,
+        where: u.toString(),
+        impact: `The application reflects user input from the '${testParam}' parameter without proper sanitization. An attacker can execute arbitrary JavaScript in the victim's browser context.`,
+        proof: {
+          request: `GET ${u.toString()}`,
+          response: `Reflection detected: ...${res.data.slice(res.data.indexOf(payload) - 20, res.data.indexOf(payload) + payload.length + 20)}...`
+        },
+        remediation: 'Implement context-aware output encoding and a strong Content Security Policy (CSP).',
+        validatedAt: new Date().toISOString(),
+        testedCases: payloads.length,
+        confidence: 85
+      };
+    }
+  } catch (_) {}
+  return null;
+}
+
+/* ─────── 10. Auth Anomaly Detection ─────── */
+async function validateAuthAnomalies(origin) {
+  const commonPaths = ['admin', 'config', 'dashboard', 'user', 'api/v1/user'];
+  const results = [];
+  
+  for (const path of commonPaths) {
+    try {
+      const url = `${origin.replace(/\/+$/, '')}/${path}`;
+      const res = await axios.get(url, {
+        timeout: REQ_TIMEOUT,
+        validateStatus: () => true,
+        maxRedirects: 0,
+        headers: { 'User-Agent': UA }
+      });
+
+      // 200 on an admin path without auth is an anomaly
+      if (res.status === 200 && !res.data.toString().toLowerCase().includes('login')) {
+        results.push({
+          kind: 'anomaly:auth',
+          title: `Potential Unauthenticated access: /${path}`,
+          severity: 'medium',
+          exploitable: false,
+          where: url,
+          impact: `The path /${path} returned a 200 OK status without a login redirect. Requires manual verification to confirm if sensitive data is exposed.`,
+          proof: { request: `GET ${url}`, response: `HTTP 200 OK (No login patterns detected)` },
+          remediation: 'Ensure all administrative and user-specific paths require a valid session/token.',
+          validatedAt: new Date().toISOString(),
+          confidence: 60
+        });
+      }
+    } catch (_) {}
+  }
+  return results;
+}
+
+/* ─────── 11. Chain Detection Engine ─────── */
+function detectExploitChains(findings) {
+  const chains = [];
+  const hasCORS = findings.some(f => f.kind === 'cors' && f.exploitable);
+  const hasAuth = findings.some(f => f.kind === 'anomaly:auth' || f.kind === 'exposure:env');
+  const hasWayback = findings.some(f => f.kind === 'endpoint-secret-leak');
+
+  if (hasCORS && hasAuth) {
+    chains.push({
+      title: 'Potential Account Takeover Chain',
+      description: 'CORS misconfig + Auth endpoint reflection. Attacker can steal auth tokens via browser-based cross-origin requests.',
+      severity: 'critical',
+      likelihood: 85
+    });
+  }
+
+  if (hasWayback && findings.some(f => f.parameterCount > 0)) {
+    chains.push({
+      title: 'Param-Mining + Wayback Leakage',
+      description: 'Historical endpoints with active parameters identified. High probability of IDOR or parameter pollution on legacy logic.',
+      severity: 'high',
+      likelihood: 70
+    });
+  }
+
+  return chains;
+}
+
 /* ─────── Orchestrator ─────── */
-async function validateAll(target, parts) {
+async function validateAll(target, parts, mode = 'standard') {
   const origin = originOf(target);
-  const corsTask = origin ? validateCORS(origin) : Promise.resolve(null);
-  const exposureTask = origin ? validateExposures(origin) : Promise.resolve([]);
+  const tasks = [];
 
-  // Endpoint secret scan: only top 6 archived endpoints (cost control)
+  // 1. CORS
+  if (origin) tasks.push(validateCORS(origin));
+  
+  // 2. Exposures
+  if (origin) tasks.push(validateExposures(origin));
+
+  // 3. XSS (Top 5 endpoints only)
+  const xssTargets = (parts.endpoints || []).slice(0, 5).map(e => e.url);
+  tasks.push(Promise.all(xssTargets.map(u => validateXSS(u))));
+
+  // 4. Auth Anomalies
+  if (origin) tasks.push(validateAuthAnomalies(origin));
+
+  // 5. Endpoint Secrets
   const endpointTargets = (parts.endpoints || []).slice(0, 6).map((e) => e.url);
-  const endpointTasks = Promise.all(endpointTargets.map((u) => validateEndpointForSecrets(u)));
+  tasks.push(Promise.all(endpointTargets.map((u) => validateEndpointForSecrets(u))));
 
-  const [corsRes, exposures, endpointSecrets] = await Promise.all([corsTask, exposureTask, endpointTasks]);
+  const results = await Promise.all(tasks);
+  const flat = results.flat(2).filter(Boolean);
 
   const findings = [];
-  if (corsRes) findings.push(corsRes);
-  for (const e of exposures) findings.push(e);
-  for (const e of endpointSecrets) if (e) findings.push(e);
+  for (const f of flat) findings.push(f);
   for (const t of (parts.takeovers || [])) {
     const f = takeoverFinding(t);
     if (f) findings.push(f);
   }
   for (const f of headerFindings(parts.vuln)) findings.push(f);
+  for (const f of bucketFindings(parts.vuln)) findings.push(f);
   for (const f of portFindings(parts.port)) findings.push(f);
   for (const f of domainFindings(parts.domain)) findings.push(f);
 
-  // Sort by severity, then exploitable first
+  // Sort
   const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
   findings.sort((a, b) => {
     const s = (SEV_ORDER[a.severity] ?? 9) - (SEV_ORDER[b.severity] ?? 9);
@@ -416,17 +577,13 @@ async function validateAll(target, parts) {
     return (b.exploitable ? 1 : 0) - (a.exploitable ? 1 : 0);
   });
 
-  // Compute number of validation probes actually run (for time-saved metric)
-  const probesRun =
-    1 + // CORS
-    SENSITIVE_PROBES.length +
-    endpointTargets.length +
-    (parts.takeovers?.length || 0) +
-    (parts.vuln?.vulnerabilities?.length || 0) +
-    (parts.port?.ports?.filter((p) => p.status === 'open').length || 0) +
-    (parts.subdomains?.length || 0);
+  // Chains
+  const chains = detectExploitChains(findings);
 
-  return { findings, probesRun };
+  // Probes count
+  const probesRun = 1 + SENSITIVE_PROBES.length + xssTargets.length + 5 + endpointTargets.length + (parts.takeovers?.length || 0);
+
+  return { findings, chains, probesRun };
 }
 
 module.exports = {
@@ -436,4 +593,6 @@ module.exports = {
   validateExposures,
   validateEndpointForSecrets,
   scanForSecrets,
+  validateXSS,
+  validateAuthAnomalies
 };

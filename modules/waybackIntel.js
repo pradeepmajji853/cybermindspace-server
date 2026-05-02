@@ -50,8 +50,8 @@ const investigate = async (domain) => {
     return {
       domain: cleanDomain,
       count: all.length,
-      snapshots: all.slice(0, 40),
-      interesting: interesting.slice(0, 25),
+      snapshots: all.slice(0, 200),
+      interesting: interesting.slice(0, 100),
       firstSeen: fmtDate(firstSeen),
       lastSeen: fmtDate(lastSeen),
       perYear,

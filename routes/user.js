@@ -67,31 +67,62 @@ router.post('/init', auth, async (req, res) => {
 });
 
 // Get search history (paginated)
+// Get search history (paginated)
 router.get('/history', auth, async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 20, 50);
     const offset = parseInt(req.query.offset) || 0;
 
-    let query = db.collection('investigations')
-      .where('userId', '==', req.user.uid)
-      .orderBy('createdAt', 'desc')
-      .limit(limit)
-      .offset(offset);
+    // Fetch from both collections without orderBy to avoid index requirement
+    // We fetch a larger sample and sort in-memory for reliability
+    const [invSnap, reconSnap] = await Promise.all([
+      db.collection('investigations')
+        .where('userId', '==', req.user.uid)
+        .limit(100)
+        .get(),
+      db.collection('reconScans')
+        .where('userId', '==', req.user.uid)
+        .limit(100)
+        .get()
+    ]);
 
-    const snapshot = await query.get();
-    const history = snapshot.docs.map(doc => ({
-      id: doc.id,
-      query: doc.data().query,
-      inputType: doc.data().inputType,
-      riskScore: doc.data().riskScore,
-      saved: doc.data().saved,
-      createdAt: doc.data().createdAt,
-    }));
+    const investigations = invSnap.docs.map(doc => {
+      const d = doc.data();
+      return {
+        id: doc.id,
+        query: d.query || 'Unknown',
+        inputType: d.inputType || 'domain',
+        riskScore: d.riskScore,
+        source: 'osint',
+        createdAt: d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : (d.createdAt || new Date().toISOString()),
+      };
+    });
 
-    res.json({ history, count: history.length });
+    const reconScans = reconSnap.docs.map(doc => {
+      const d = doc.data();
+      return {
+        id: doc.id,
+        query: d.target || 'Unknown',
+        inputType: d.type || 'domain',
+        riskScore: d.riskScore,
+        source: 'recon',
+        createdAt: d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : (d.createdAt || new Date().toISOString()),
+      };
+    });
+
+    // Merge and sort in-memory
+    const merged = [...investigations, ...reconScans]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(offset, offset + limit);
+
+    res.json({ 
+      history: merged, 
+      count: merged.length,
+      debug: { inv: investigations.length, recon: reconScans.length } 
+    });
   } catch (err) {
-    console.error('[USER] History fetch error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch history' });
+    console.error('[USER] History fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch history', details: err.message });
   }
 });
 

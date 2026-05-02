@@ -41,6 +41,11 @@ const SENSITIVE_PATHS = [
   { path: 'robots.txt',                 name: 'robots.txt',               severity: 'info',     cwe: null      },
   { path: 'sitemap.xml',                name: 'sitemap.xml',              severity: 'info',     cwe: null      },
   { path: '.well-known/security.txt',   name: 'security.txt (good)',      severity: 'good',     cwe: null      },
+  { path: 'actuator/env',               name: 'Spring Boot Actuator Env',  severity: 'critical', cwe: 'CWE-200' },
+  { path: 'actuator/health',            name: 'Spring Boot Actuator Health',severity: 'low',      cwe: 'CWE-200' },
+  { path: 'swagger-ui.html',            name: 'Swagger UI exposed',       severity: 'medium',   cwe: 'CWE-200' },
+  { path: 'v2/api-docs',                name: 'API Docs exposed',         severity: 'medium',   cwe: 'CWE-200' },
+  { path: '.env.example',               name: '.env.example Exposure',    severity: 'medium',   cwe: 'CWE-200' },
 ];
 
 function probeTLSDetailed(host) {
@@ -102,6 +107,34 @@ async function probePath(baseUrl, path) {
     });
     return { url, status: res.status, length: Number(res.headers['content-length']) || (res.data ? String(res.data).length : 0) };
   } catch (e) { return { url: path, status: 0 }; }
+}
+
+async function checkCloudBuckets(domain) {
+  const providers = [
+    { name: 'AWS S3', url: `https://${domain}.s3.amazonaws.com`, check: (b) => b.includes('ListBucketResult') },
+    { name: 'GCP Storage', url: `https://storage.googleapis.com/${domain}`, check: (b) => b.includes('ListBucketResult') },
+    { name: 'Azure Blob', url: `https://${domain}.blob.core.windows.net?restype=container&comp=list`, check: (b) => b.includes('EnumerationResults') },
+  ];
+  const results = [];
+  await Promise.all(providers.map(async (p) => {
+    try {
+      const res = await axios.get(p.url, { timeout: 4000, validateStatus: () => true });
+      if (res.status === 200) {
+        const body = typeof res.data === 'string' ? res.data : JSON.stringify(res.data || '');
+        if (p.check(body)) {
+          results.push({
+            category: 'exposure',
+            name: `Exposed Cloud Bucket: ${p.name}`,
+            status: 'vulnerable',
+            severity: 'critical',
+            description: `The cloud storage bucket is publicly readable at ${p.url}. Sensitive files can be accessed.`,
+            value: p.url,
+          });
+        }
+      }
+    } catch (_) {}
+  }));
+  return results;
 }
 
 function severityWeight(s) {
@@ -216,6 +249,9 @@ const investigate = async (input) => {
     return issues;
   });
 
+  // Cloud buckets
+  const bucketChecks = await checkCloudBuckets(host);
+
   // Sensitive paths (limited concurrency)
   const pathChecks = [];
   for (let i = 0; i < SENSITIVE_PATHS.length; i += 5) {
@@ -236,7 +272,7 @@ const investigate = async (input) => {
   }
 
   // Aggregate
-  const allChecks = [...headerChecks, corsCheck, ...leakChecks, ...tlsChecks, ...cookieFindings, ...pathChecks];
+  const allChecks = [...headerChecks, corsCheck, ...leakChecks, ...tlsChecks, ...cookieFindings, ...pathChecks, ...bucketChecks];
   const vulnerable = allChecks.filter(c => c.status === 'vulnerable');
 
   // Score: 100 - sum of severity weights (capped)

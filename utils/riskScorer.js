@@ -82,6 +82,20 @@ function calculateRisk(results) {
     if (results.whoisPrivacy.opsecScore < 40) { score += 8; indicators.push(`WHOIS privacy weak (OPSEC ${results.whoisPrivacy.opsecScore}/100)`); }
   }
 
+  // Research (The Sentinel)
+  if (results.research) {
+    const r = results.research;
+    const cloudExposed = (r.infrastructure?.cloud || []).filter(c => c.status === 'EXPOSED/OPEN').length;
+    if (cloudExposed > 0) {
+      score += Math.min(30, cloudExposed * 15);
+      indicators.push(`${cloudExposed} exposed cloud storage bucket(s) identified`);
+    }
+    if (r.correlationPoints?.length > 0) {
+      score += Math.min(10, r.correlationPoints.length * 2);
+      indicators.push(`${r.correlationPoints.length} advanced research correlation point(s)`);
+    }
+  }
+
   return { score: Math.min(score, 100), indicators };
 }
 

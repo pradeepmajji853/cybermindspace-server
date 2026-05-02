@@ -55,6 +55,7 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/tools', require('./routes/tools'));
 app.use('/api/recon', require('./routes/recon'));
+app.use('/api/workspaces', require('./routes/workspaces'));
 
 // Health check
 app.get('/api/health', (req, res) => {

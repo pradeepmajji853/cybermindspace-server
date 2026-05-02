@@ -65,16 +65,19 @@ router.post('/scan', auth, scanIpLimiter, rateLimiter, async (req, res) => {
     const isPro = plan === 'pro' || plan === 'elite';
 
     const fullReport = await runRecon(cleaned, type);
+    const workspaceId = req.body.workspaceId || null;
 
     const payload = isPro ? fullReport : applyFreeTier(fullReport);
     payload.plan = plan;
     payload.searchesRemaining = req.searchesRemaining;
     payload.elapsedMs = Date.now() - t0;
+    payload.workspaceId = workspaceId;
 
     let scanId = null;
     try {
       const ref = await db.collection('reconScans').add({
         userId: req.user.uid,
+        workspaceId,
         target: payload.target,
         type: payload.type,
         riskScore: payload.risk?.score || 0,
@@ -91,6 +94,48 @@ router.post('/scan', auth, scanIpLimiter, rateLimiter, async (req, res) => {
       payload.id = scanId;
       cache.set(`recon:scan:${scanId}`, fullReport, 60 * 60 * 1000);
       await updateHunterStats(req.user.uid, payload);
+
+      // ─── Update Workspace Progress ───
+      if (workspaceId) {
+        const wsRef = db.collection('workspaces').doc(workspaceId);
+        const wsDoc = await wsRef.get();
+        if (wsDoc.exists && wsDoc.data().userId === req.user.uid) {
+          const wsData = wsDoc.data();
+          const targets = Array.isArray(wsData.targets) ? wsData.targets : [];
+          
+          // Use an object structure for targets to store progress
+          const existingIdx = targets.findIndex(t => (typeof t === 'string' ? t === payload.target : t.host === payload.target));
+          const targetMeta = {
+            host: payload.target,
+            lastScanId: scanId,
+            verifiedFindings: payload.summary?.verifiedFindings || 0,
+            criticalFindings: payload.summary?.criticalFindings || 0,
+            subdomainCount: payload.summary?.subdomainCount || 0,
+            endpointCount: payload.summary?.endpointCount || 0,
+            parameterCount: payload.summary?.parameterCount || 0,
+            difficulty: payload.summary?.difficulty || 'Medium',
+            reconStatus: payload.summary?.reconStatus || 'Surface Mapped',
+            signals: payload.summary?.signalIndicators || { high: 0, medium: 0, low: 0 },
+            nextActions: payload.summary?.nextActions || [],
+            attackPath: payload.summary?.attackPath || null,
+            updatedAt: new Date().toISOString()
+          };
+
+          if (existingIdx >= 0) {
+            targets[existingIdx] = targetMeta;
+          } else {
+            targets.push(targetMeta);
+          }
+
+          await wsRef.update({ 
+            targets, 
+            updatedAt: new Date().toISOString(),
+            // High-level stats for the Dashboard UI
+            totalTargets: targets.length,
+            totalFindings: targets.reduce((acc, t) => acc + (t.verifiedFindings || 0), 0)
+          });
+        }
+      }
     } catch (e) {
       console.error('[RECON] persist failed:', e.message);
     }
@@ -303,10 +348,10 @@ async function updateHunterStats(uid, scanPayload) {
     const totalCriticals = (u.totalCriticals || 0) + criticalDelta;
     const totalMinutesSaved = (u.totalMinutesSaved || 0) + minutesDelta;
 
-    // Score weights real value: exploitable + critical findings dominate.
+    // Re-balanced formula: raw scans give no points. Only bugs & consistency matter.
     const hunterScore = Math.min(
       100,
-      totalScans * 2 + totalFindings * 2 + totalExploitable * 6 + totalCriticals * 10 + streak * 2
+      Math.floor(totalFindings * 0.5 + totalExploitable * 3 + totalCriticals * 8 + streak * 1)
     );
 
     tx.set(userRef, {
